@@ -1,13 +1,9 @@
 #ifndef _RISCV_MTRAP_H
 #define _RISCV_MTRAP_H
 
+#include "sanctum_config.h"
 #include "encoding.h"
-
-#ifdef __riscv_atomic
-# define MAX_HARTS 8 // arbitrary
-#else
-# define MAX_HARTS 1
-#endif
+#include "bits.h"
 
 #ifndef __ASSEMBLER__
 

@@ -11,11 +11,32 @@
 #include <errno.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include "enclave_syscall.h"
 
 void __attribute__((noreturn)) bad_trap(uintptr_t* regs, uintptr_t dummy, uintptr_t mepc)
 {
   die("machine mode: unhandlable trap %d @ %p", read_csr(mcause), mepc);
 }
+
+void redirect_trap(uintptr_t epc, uintptr_t mstatus, uintptr_t mbadaddr)
+{
+  write_csr(sbadaddr, mbadaddr);
+  write_csr(sepc, epc);
+  write_csr(scause, read_csr(mcause));
+  write_csr(mepc, read_csr(stvec));
+
+  uintptr_t new_mstatus = mstatus & ~(MSTATUS_SPP | MSTATUS_SPIE | MSTATUS_SIE);
+  uintptr_t mpp_s = MSTATUS_MPP & (MSTATUS_MPP >> 1);
+  new_mstatus |= (mstatus * (MSTATUS_SPIE / MSTATUS_SIE)) & MSTATUS_SPIE;
+  new_mstatus |= (mstatus / (mpp_s / MSTATUS_SPP)) & MSTATUS_SPP;
+  write_csr(mstatus, new_mstatus);
+
+  extern void __redirect_trap();
+  return __redirect_trap();
+}
+
+// Specific handlers for S-mode traps
+// ==================================
 
 static uintptr_t mcall_console_putchar(uint8_t ch)
 {
@@ -97,7 +118,7 @@ static uintptr_t mcall_set_timer(uint64_t when)
 
 static void send_ipi_many(uintptr_t* pmask, int event)
 {
-  _Static_assert(MAX_HARTS <= 8 * sizeof(*pmask), "# harts > uintptr_t bits");
+  _Static_assert(NUM_HARTS <= 8 * sizeof(*pmask), "# harts > uintptr_t bits");
   uintptr_t mask = hart_mask;
   if (pmask)
     mask &= load_uintptr_t(pmask, read_csr(mepc));
@@ -125,14 +146,19 @@ static void send_ipi_many(uintptr_t* pmask, int event)
   }
 }
 
-void mcall_trap(uintptr_t* regs, uintptr_t mcause, uintptr_t mepc)
+// Route S-mode traps
+// ==================
+
+void ecall_from_s_trap(uintptr_t* regs, uintptr_t mcause, uintptr_t mepc)
 {
   write_csr(mepc, mepc + 4);
 
-  uintptr_t n = regs[17], arg0 = regs[10], arg1 = regs[11], retval, ipi_type;
+  uintptr_t n = regs[17], arg0 = regs[10], /* arg1 = regs[11], */ retval, ipi_type;
 
   switch (n)
   {
+    // SM calls from OS Kernel
+    // Standard OS calls
     case SBI_CONSOLE_PUTCHAR:
       retval = mcall_console_putchar(arg0);
       break;
@@ -172,22 +198,100 @@ send_ipi:
   regs[10] = retval;
 }
 
-void redirect_trap(uintptr_t epc, uintptr_t mstatus, uintptr_t badaddr)
+// Specific handlers for U-mode traps
+// ==================================
+
+
+// Route U-mode traps
+// ==================
+
+void * virt_to_phys(uint64_t va) {
+  // Get the page table base pointer
+  // Assume Sv39
+
+  // Level 2
+  uint64_t * PT2 = (uint64_t*)((read_csr(0x180) & 0xFFFFFFFFFFF) << 12); // SATP: low 44 bits are the PPN
+  int vpn2 = (va >> 30) & 0x1FF;
+  uint64_t pte2 = PT2[vpn2];
+  uint64_t ppn2 = (pte2 >> 10);
+  char xwrv2 = pte2 & 0xF;
+  if ((xwrv2 & 0x1) == 0) { // Invalid
+    return 0;
+  } else if (xwrv2 != 1) { // Leaf; giga page
+    pte2 |= 0x80;
+    PT2[vpn2] = pte2; // TODO: this update must be atomic in general
+    uint64_t mask2 = (0xFFFFFFC0000) << 12;
+    uint64_t pa = (va & ~(mask2)) | ((ppn2 << 12) & mask2);
+    return pa;
+  }
+
+  // Level 1
+  uint64_t * PT1 = (uint64_t*)(ppn2 << 12);
+  int vpn1 = (va >> 21) & 0x1FF;
+  uint64_t pte1 = PT1[vpn1];
+  uint64_t ppn1 = (pte1 >> 10);
+  char xwrv1 = pte1 & 0xF;
+  if ((xwrv1 & 0x1) == 0) { // Invalid
+    return 0;
+  } else if (xwrv1 != 1) { // Leaf; mega page
+    pte1 |= 0x80;
+    PT1[vpn1] = pte1; // TODO: this update should be atomic
+    uint64_t mask1 = (0xFFFFFFFFE00) << 12;
+    uint64_t pa = (va & ~(mask1)) | ((ppn1 << 12) & mask1);
+    return pa;
+  }
+
+  // Level 0
+  uint64_t * PT0 = (uint64_t*)(ppn1 << 12);
+  int vpn0 = (va >> 12) & 0x1FF;
+  uint64_t pte0 = PT0[vpn0];
+  uint64_t ppn0 = (pte0 >> 10);
+  char xwrv0 = pte0 & 0xF;
+  if ((xwrv0 & 0x1) == 0) { // Invalid
+    return 0;
+  }
+
+  // Set dirty bit
+  pte0 |= 0x80;
+  PT0[vpn0] = pte0; // TODO: this update should be atomic
+  uint64_t mask0 = (0xFFFFFFFFFFF) << 12;
+  uint64_t pa = (va & ~(mask0)) | ((ppn0 << 12) & mask0);
+  return pa;
+
+  // TODO: probably wise to use MSTATUS to ensure OS permissions are not ignored during SM syscalls
+}
+
+void ecall_from_u_trap(uintptr_t* regs, uintptr_t mcause, uintptr_t mepc)
 {
-  write_csr(sbadaddr, badaddr);
-  write_csr(sepc, epc);
-  write_csr(scause, read_csr(mcause));
-  write_csr(mepc, read_csr(stvec));
+  //putstring("SM CALL FROM U\n");
 
-  uintptr_t new_mstatus = mstatus & ~(MSTATUS_SPP | MSTATUS_SPIE | MSTATUS_SIE);
-  uintptr_t mpp_s = MSTATUS_MPP & (MSTATUS_MPP >> 1);
-  new_mstatus |= (mstatus * (MSTATUS_SPIE / MSTATUS_SIE)) & MSTATUS_SPIE;
-  new_mstatus |= (mstatus / (mpp_s / MSTATUS_SPP)) & MSTATUS_SPP;
-  new_mstatus |= mpp_s;
-  write_csr(mstatus, new_mstatus);
+  write_csr(mepc, mepc + 4);
 
-  extern void __redirect_trap();
-  return __redirect_trap();
+  uintptr_t n = regs[17], arg0 = regs[10], arg1 = regs[11], arg2 = regs[12], arg3 = regs[13], retval, ipi_type;
+
+  switch (n)
+  {
+    // Security monitor calls
+    case UBI_SM_DEADBEEF:
+      retval = 0xDEADBEEF;
+      break;
+    case UBI_SM_GET_FIELD:
+      retval = sm_fetch_field( (void*)virt_to_phys(arg0), (uint64_t)arg1 );
+      break;
+    case UBI_SM_AES:
+      retval = sm_aes_cbc( (void*)virt_to_phys(arg0), (uint8_t*)virt_to_phys(arg1), (uint32_t)arg2 );
+      break;
+    case UBI_SM_SIGN:
+      retval = sm_sign_message( (uint8_t*)virt_to_phys(arg0), (void*)virt_to_phys(arg1), (uint32_t)arg2 );
+      break;
+    case UBI_SM_POET:
+      retval = sm_poet( (uint8_t*)virt_to_phys(arg0), (uint8_t*)virt_to_phys(arg1), (uint8_t*)virt_to_phys(arg2), (uint32_t)arg3 );
+      break;
+    default:
+      retval = -ENOSYS;
+      break;
+  }
+  regs[10] = retval;
 }
 
 void pmp_trap(uintptr_t* regs, uintptr_t mcause, uintptr_t mepc)
@@ -221,3 +325,10 @@ void trap_from_machine_mode(uintptr_t* regs, uintptr_t dummy, uintptr_t mepc)
       bad_trap(regs, dummy, mepc);
   }
 }
+
+void delegate_trap(uintptr_t* regs, uintptr_t dummy, uintptr_t mepc)
+{
+  // Send this trap down to S-mode
+  redirect_trap(mepc, read_csr(mstatus), read_csr(mbadaddr));
+}
+

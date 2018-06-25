@@ -1,27 +1,68 @@
 OUTPUT_ARCH( "riscv" )
-
-ENTRY( reset_vector )
+ENTRY( _start )
 
 SECTIONS
 {
+  /* Trusted bootloader is invoked via a function call at the base of its segment! */
 
-  /*--------------------------------------------------------------------*/
-  /* Code and read-only segment                                         */
-  /*--------------------------------------------------------------------*/
+  . = (0x80000000);
+  _start = .;
 
-  /* Begining of code and text segment */
+  /* A special HTIF region to communicate with the host */
   . = 0x80000000;
-  _ftext = .;
-  PROVIDE( eprol = . );
+  //.htif ALIGN(0x1000) (NOLOAD) : {
+  //  *(.htif.fromhost)
+  //  *(.htif.tohost)
+  //}
+  //. = ALIGN(0x1000);
 
-  .text :
-  {
-    *(.text.init)
+
+  /* Reserve some space for M-mode stacks (handled by ROT) */
+  .m_stacks (NOLOAD) : {
+    *(.mstacks)
   }
 
-  /* text: Program code section */
-  .text : 
-  {
+  ASSERT (( . <= 0x80002000), "HTIF and Stacks overlap with the bootloader!")
+
+
+  /* trusted (but authenticated) boot loader in DRAM */
+  . = 0x80002000;
+  .bootloader : {
+    PROVIDE(bootloader_ptr = .);
+    *(.bootloader)
+  }
+  ASSERT (( . == 0x80002000 + 131072), "Bootloader segment is of incorrect size :(")
+
+  . = (0x80002000 + 131072);
+
+  /* Security monitor's keys */
+  .sm_header : {
+    PROVIDE(PK_D = .);
+    . += 32;
+
+    PROVIDE(SM_H = .);
+    . += 64;
+
+    PROVIDE(PK_SM = .);
+    . += 32;
+
+    PROVIDE(SK_SM = .);
+    . += 64;
+
+    PROVIDE(SM_SIG = .);
+    . += 64;
+
+    PROVIDE(sm_size = .);
+    QUAD( SIZEOF(.sm) );
+  }
+
+  . = ALIGN(0x1000);
+
+  /* Security monitor */
+  .sm : {
+    PROVIDE(sm_ptr = .);
+    _ftext = .;
+    *(.text.init)
     *(.text)
     *(.text.*)
     *(.gnu.linkonce.t.*)
@@ -34,6 +75,8 @@ SECTIONS
     *(.rodata)
     *(.rodata.*)
     *(.gnu.linkonce.r.*)
+//  *(.got)
+//  *(.got*)
   }
 
   /* End of code and read-only segment */
@@ -43,12 +86,14 @@ SECTIONS
   /*--------------------------------------------------------------------*/
   /* HTIF, isolated onto separate page                                  */
   /*--------------------------------------------------------------------*/
+	/*
   . = ALIGN(0x1000);
   .htif :
   {
     *(.htif)
   }
   . = ALIGN(0x1000);
+  */
 
   /*--------------------------------------------------------------------*/
   /* Initialized data segment                                           */
@@ -99,6 +144,9 @@ SECTIONS
   .sbi :
   {
     *(.sbi)
+
+    /* payload provides its own alignment and _idpt_start symbol */
+    *(.idpt)
   }
 
   .payload :

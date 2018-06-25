@@ -4,6 +4,8 @@
 
 volatile uint64_t tohost __attribute__((section(".htif")));
 volatile uint64_t fromhost __attribute__((section(".htif")));
+//extern volatile uint64_t fromhost;
+//extern volatile uint64_t tohost;
 volatile int htif_console_buf;
 static spinlock_t htif_lock = SPINLOCK_INIT;
 

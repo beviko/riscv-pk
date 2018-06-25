@@ -9,6 +9,7 @@
 #include <limits.h>
 
 pte_t* root_page_table;
+extern pte_t idpt;;
 uintptr_t mem_size;
 volatile uint64_t* mtime;
 volatile uint32_t* plic_priorities;
@@ -34,21 +35,20 @@ static void mstatus_init()
 static void delegate_traps()
 {
   uintptr_t interrupts = MIP_SSIP | MIP_STIP | MIP_SEIP;
-  uintptr_t exceptions =
-    (1U << CAUSE_MISALIGNED_FETCH) |
-    (1U << CAUSE_FETCH_PAGE_FAULT) |
-    (1U << CAUSE_BREAKPOINT) |
-    (1U << CAUSE_LOAD_PAGE_FAULT) |
-    (1U << CAUSE_STORE_PAGE_FAULT) |
-    (1U << CAUSE_BREAKPOINT) |
-    (1U << CAUSE_USER_ECALL);
+  uintptr_t exceptions = 0;
+  //  (1U << CAUSE_MISALIGNED_FETCH) |
+  //  (1U << CAUSE_FETCH_PAGE_FAULT) |
+  //  (1U << CAUSE_BREAKPOINT) |
+  //  (1U << CAUSE_LOAD_PAGE_FAULT) |
+  //  (1U << CAUSE_STORE_PAGE_FAULT) |
+  //  (1U << CAUSE_USER_ECALL);
 
   write_csr(mideleg, interrupts);
   write_csr(medeleg, exceptions);
   assert(read_csr(mideleg) == interrupts);
   assert(read_csr(medeleg) == exceptions);
 }
-
+/*
 static void fp_init()
 {
   assert(read_csr(mstatus) & MSTATUS_FS);
@@ -64,8 +64,8 @@ static void fp_init()
   clear_csr(misa, fd_mask);
   assert(!(read_csr(misa) & fd_mask));
 #endif
-}
-
+} 
+*/
 hls_t* hls_init(uintptr_t id)
 {
   hls_t* hls = OTHER_HLS(id);
@@ -81,7 +81,7 @@ static void memory_init()
 static void hart_init()
 {
   mstatus_init();
-  fp_init();
+  //fp_init();
   delegate_traps();
 }
 

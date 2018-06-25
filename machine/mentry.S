@@ -2,28 +2,35 @@
 
 #include "mtrap.h"
 #include "bits.h"
+#include "mcall.h"
+#include "encoding.h"
+
+#include "sanctum_config.h"
+
+#define BAD_TRAP_VECTOR 0
+#define TRAP_FROM_MACHINE_MODE_VECTOR 13
 
   .data
   .align 6
 trap_table:
 #define BAD_TRAP_VECTOR 0
-  .word bad_trap
-  .word pmp_trap
-  .word illegal_insn_trap
-  .word bad_trap
-  .word misaligned_load_trap
-  .word pmp_trap
-  .word misaligned_store_trap
-  .word pmp_trap
-  .word bad_trap
-  .word mcall_trap
-  .word bad_trap
-  .word bad_trap
-  .word bad_trap
+  .word bad_trap                //  0: misaligned instruction address
+  .word pmp_trap                //  1: instruction access fault
+  .word illegal_insn_trap       //  2: illegal instruction
+  .word bad_trap                //  3: breakpoint
+  .word misaligned_load_trap    //  4: misaligned load addr
+  .word pmp_trap                //  5: load access fault
+  .word misaligned_store_trap   //  6: misaligned store/AMO addr
+  .word pmp_trap                //  7: store/AMO access fault
+  .word ecall_from_u_trap       //  8: ECALL from U-mode
+  .word ecall_from_s_trap       //  9: ECALL from S-mode
+  .word bad_trap                // 10: (reserved)
+  .word bad_trap                // 11: ECALL from M-mode
+  .word bad_trap                // 12: instruction page fault
 #define TRAP_FROM_MACHINE_MODE_VECTOR 13
-  .word __trap_from_machine_mode
-  .word bad_trap
-  .word bad_trap
+  .word __trap_from_machine_mode// 13: load page fault
+  .word bad_trap                // 14: (reserved)
+  .word bad_trap                // 15: store/AMO page fault
 
   .option norvc
   .section .text.init,"ax",@progbits
@@ -31,17 +38,111 @@ trap_table:
 reset_vector:
   j do_reset
 
+.Ldelegate_to_s:
+  # delegate trap to S mode
+  # Set sIE to 0
+
+  STORE a2, 12*REGBYTES(sp)
+
+  csrr a0, mstatus
+  # MSTATUS_SPP:    0x00000100
+  # MSTATUS_SPIE:   0x00000020
+  # MSTATUS_SIE:    0x00000002
+  # MSTATUS_MPP:    0x00001800
+
+  # sPIE <-- sIE
+  andi a1, a0, 0x2
+  sll a2, a1, 4
+
+  # sPP <-- mPP[0]
+  srl a1, a0, 3
+  andi a1, a1, 0x100
+  or a2, a2, a1
+
+  # mPP <-- 0x1
+  li a1, 0x0800
+  or a2, a2, a1
+
+  # Set sIE to 0, add sPP, sPIE
+  li a1, 0xFFFFFFFFFFFFE6DD
+  and a0, a0, a1
+  or a0, a0, a2
+  csrw mstatus, a0
+
+  LOAD a2, 12*REGBYTES(sp)
+
+  # sepc <-- mepc
+  csrr a0, mepc
+  csrw sepc, a0
+  # scause <-- mcause
+  csrr a0, mcause
+  csrw scause, a0
+  # sbadaddr <-- mbadaddr
+  csrr a0, mbadaddr
+  csrw sbadaddr, a0
+  # Set M-mode return address to S-mode handler
+  # mepc <-- stvec
+  csrr a0, stvec
+  csrw mepc, a0
+  # Restore dirty registers and stack pointer
+  LOAD a0, 10*REGBYTES(sp)
+  LOAD a1, 11*REGBYTES(sp)
+  csrrw sp, mscratch, sp # sp <--> mscratch (save SP, restore M-mode SP)
+  mret
+
 trap_vector:
-  csrrw sp, mscratch, sp
+  csrrw sp, mscratch, sp # sp <--> mscratch (save SP, restore M-mode SP)
   beqz sp, .Ltrap_from_machine_mode
 
   STORE a0, 10*REGBYTES(sp)
   STORE a1, 11*REGBYTES(sp)
 
   csrr a1, mcause
+
+  # enclave --> do NOT delegate, ever
+  # (let's say a7=UBI_SM_DEADBEEF for encalves right now)
+  # (later use dram bitmap)
+  # TODO: test for enclave accesses here!
+  li a0, UBI_SM_DEADBEEF
+  beq a0, a7, .Lnodelegate
+  li a0, UBI_SM_GET_FIELD
+  beq a0, a7, .Lnodelegate
+  li a0, UBI_SM_AES
+  beq a0, a7, .Lnodelegate
+  li a0, UBI_SM_SIGN
+  beq a0, a7, .Lnodelegate
+  li a0, UBI_SM_POET
+  beq a0, a7, .Lnodelegate
+
+  # delegate causes:
+  li a0, CAUSE_MISALIGNED_FETCH
+  beq a0, a1, .Ldelegate_to_s
+
+  li a0, CAUSE_BREAKPOINT
+  beq a0, a1, .Ldelegate_to_s
+
+  li a0, CAUSE_USER_ECALL
+  beq a0, a1, .Ldelegate_to_s
+
+  li a0, CAUSE_FETCH_PAGE_FAULT
+  beq a0, a1, .Ldelegate_to_s
+
+  li a0, CAUSE_LOAD_PAGE_FAULT
+  beq a0, a1, .Ldelegate_to_s
+
+  li a0, CAUSE_STORE_PAGE_FAULT
+  beq a0, a1, .Ldelegate_to_s
+
+#  # delegate masked interrupts (SEIP | STIP | SSIP):
+#  #li a0, 0x222
+#  #and a0, a0, a1
+#  #bnez a0, .Ldelegate_to_s
+#
+.Lnodelegate:
   bgez a1, .Lhandle_trap_in_machine_mode
 
   # This is an interrupt.  Discard the mcause MSB and decode the rest.
+  # DELEGATE IT
   sll a1, a1, 1
 
   # Is it a machine timer interrupt?
@@ -212,7 +313,7 @@ __trap_from_machine_mode:
 
 do_reset:
   li x1, 0
-  li x2, 0
+  //li x2, 0 // sp: stack pointer
   li x3, 0
   li x4, 0
   li x5, 0
@@ -251,11 +352,15 @@ do_reset:
   csrr t1, mtvec
 1:bne t0, t1, 1b
 
-  la sp, stacks + RISCV_PGSIZE - MENTRY_FRAME_SIZE
+  # Reserve 1 page per hart for machine mode stack
+  # MENTRY_FRAME_SIZE at the top
 
+  la sp, m_stack_ptr
+  li a2, MENTRY_FRAME_SIZE
+  sub sp, sp, a2
   csrr a3, mhartid
   slli a2, a3, RISCV_PGSHIFT
-  add sp, sp, a2
+  sub sp, sp, a2
 
   # Boot on the first unmasked hart
   la a4, platform__disabled_hart_mask
@@ -296,7 +401,3 @@ do_reset:
   wfi
   j .LmultiHart
 
-  .bss
-  .align RISCV_PGSHIFT
-stacks:
-  .skip RISCV_PGSIZE * MAX_HARTS

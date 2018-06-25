@@ -11,6 +11,11 @@ union byte_array {
   uint64_t int64;
 };
 
+static inline int insn_len(long insn)
+{
+  return (insn & 0x3) < 0x3 ? 2 : 4;
+}
+
 void misaligned_load_trap(uintptr_t* regs, uintptr_t mcause, uintptr_t mepc)
 {
   union byte_array val;

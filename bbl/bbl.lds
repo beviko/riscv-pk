@@ -4,7 +4,7 @@ ENTRY( reset_vector )
 
 SECTIONS
 {
-  . = 0x80000000; /* load starting at the beginning of DRAM */
+  . = 0x7ffffd74; /* load starting at the beginning of DRAM */
   
 	.header :
   {

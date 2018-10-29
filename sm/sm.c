@@ -36,6 +36,7 @@ int osm_init()
 }
 
 
+/* 
 void sm_print_cert()
 {
 	int i;
@@ -59,7 +60,7 @@ void sm_print_cert()
 	}
 	printm("=================================\n");
 }
-
+*/
 void sm_init(void)
 {
 	// initialize SMM
